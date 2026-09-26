@@ -178,7 +178,7 @@ impl<M: InputModeKind> InputBaseState<M> {
     pub(super) fn left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.pause_blink_cursor(cx);
         if self.selected_range.is_empty() {
-            self.move_to(self.previous_boundary(self.cursor()), None, cx);
+            self.move_to(self.previous_grapheme_boundary(self.cursor()), None, cx);
         } else {
             self.move_to(self.selected_range.start, None, cx)
         }
@@ -187,7 +187,11 @@ impl<M: InputModeKind> InputBaseState<M> {
     pub(super) fn right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
         self.pause_blink_cursor(cx);
         if self.selected_range.is_empty() {
-            self.move_to(self.next_boundary(self.selected_range.end), None, cx);
+            self.move_to(
+                self.next_grapheme_boundary(self.selected_range.end),
+                None,
+                cx,
+            );
         } else {
             self.move_to(self.selected_range.end, None, cx)
         }

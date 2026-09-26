@@ -1223,12 +1223,12 @@ impl<M: InputModeKind> InputBaseState<M> {
 
     pub(super) fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.undo_manager.break_transaction_coalescing();
-        self.select_to(self.previous_boundary(self.cursor()), cx);
+        self.select_to(self.previous_grapheme_boundary(self.cursor()), cx);
     }
 
     pub(super) fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
         self.undo_manager.break_transaction_coalescing();
-        self.select_to(self.next_boundary(self.cursor()), cx);
+        self.select_to(self.next_grapheme_boundary(self.cursor()), cx);
     }
 
     pub(super) fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -2435,6 +2435,23 @@ impl<M: InputModeKind> InputBaseState<M> {
         offset
     }
 
+    pub(super) fn previous_grapheme_boundary(&self, offset: usize) -> usize {
+        self.clamp_offset_to_visible_backward(super::grapheme::boundary(
+            &self.text,
+            offset,
+            Bias::Left,
+        ))
+    }
+
+    pub(super) fn next_grapheme_boundary(&self, offset: usize) -> usize {
+        self.clamp_offset_to_visible_forward(super::grapheme::boundary(
+            &self.text,
+            offset,
+            Bias::Right,
+        ))
+    }
+
+    // Deletion and line/word operations retain their code-point policy.
     pub(super) fn previous_boundary(&self, offset: usize) -> usize {
         let mut offset = self.text.clip_offset(offset.saturating_sub(1), Bias::Left);
         if let Some(ch) = self.text.char_at(offset) {
@@ -3304,6 +3321,65 @@ mod tests {
     use crate::input::{EditorMode, InputMode, TextareaMode};
 
     struct TestRoot<M: InputModeKind>(Entity<InputBaseState<M>>);
+
+    #[gpui::test]
+    fn grapheme_arrow_movement_keeps_user_characters_whole(cx: &mut TestAppContext) {
+        let view = InputView::build(cx, |state| state);
+        let mut cx = VisualTestContext::from_window(view.window_handle.into(), cx);
+        cx.update(|window, cx| {
+            view.input.update(cx, |state, cx| {
+                for cluster in ["e\u{301}", "👩‍💻", "🇬🇧", "👍🏽"] {
+                    let text = format!("A{cluster}B");
+                    state.set_value(text.clone(), window, cx);
+                    state.set_selected_range(text.len()..text.len(), cx);
+                    state.left(&MoveLeft, window, cx);
+                    assert_eq!(state.cursor(), text.len() - 1);
+                    state.left(&MoveLeft, window, cx);
+                    assert_eq!(state.cursor(), 1);
+                    state.right(&MoveRight, window, cx);
+                    assert_eq!(state.cursor(), text.len() - 1);
+                }
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn grapheme_shift_selection_replaces_the_whole_cluster(cx: &mut TestAppContext) {
+        let view = InputView::build(cx, |state| state);
+        let mut cx = VisualTestContext::from_window(view.window_handle.into(), cx);
+        cx.update(|window, cx| {
+            view.input.update(cx, |state, cx| {
+                for backward in [false, true] {
+                    state.set_value("A👩‍💻B", window, cx);
+                    let end = state.text.len() - 1;
+                    if backward {
+                        state.set_selected_range(end..end, cx);
+                        state.select_left(&SelectLeft, window, cx);
+                    } else {
+                        state.set_selected_range(1..1, cx);
+                        state.select_right(&SelectRight, window, cx);
+                    }
+                    assert_eq!(state.selected_range.start..state.selected_range.end, 1..end);
+                    state.replace_text_in_range(None, "X", window, cx);
+                    assert_eq!(state.value(), "AXB");
+                }
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn grapheme_navigation_does_not_change_codepoint_backspace(cx: &mut TestAppContext) {
+        let view = InputView::build(cx, |state| state);
+        let mut cx = VisualTestContext::from_window(view.window_handle.into(), cx);
+        cx.update(|window, cx| {
+            view.input.update(cx, |state, cx| {
+                state.set_value("e\u{301}", window, cx);
+                state.set_selected_range(3..3, cx);
+                state.backspace(&Backspace, window, cx);
+                assert_eq!(state.value(), "e");
+            })
+        });
+    }
 
     impl<M: InputModeKind> Render for TestRoot<M> {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {

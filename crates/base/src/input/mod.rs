@@ -26,6 +26,8 @@ mod display_map;
 mod editor;
 #[path = "base/element.rs"]
 mod element;
+#[path = "base/grapheme.rs"]
+mod grapheme;
 #[path = "editor/highlighting.rs"]
 mod highlighting;
 #[path = "editor/indent.rs"]

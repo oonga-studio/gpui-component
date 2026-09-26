@@ -1661,7 +1661,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         }
 
         // In multi-line mode with `submit_on_enter` enabled, a plain `Enter`
-        // (without Shift) is treated as submit: propagate the action and emit
+        // (without Shift) is treated as submit: consume the action and emit
         // PressEnter without inserting a newline. `Shift+Enter` still inserts
         // a newline.
         let insert_newline = self.is_multi_line() && (!self.submit_on_enter || action.shift);
@@ -1682,7 +1682,12 @@ impl<M: InputModeKind> InputBaseState<M> {
             // Single line input or submit-on-enter: just emit the event
             // (e.g.: in a dialog to confirm, or a chat textarea to send).
             self.undo_manager.break_transaction_coalescing();
-            cx.propagate();
+            if self.is_single_line() {
+                cx.propagate();
+            }
+            // A submit-mode textarea consumes Enter. Propagating it would let
+            // the platform's text-input fallback insert a newline after the
+            // submit event, changing a draft whose submission is rejected.
         }
 
         cx.emit(InputEvent::PressEnter {
@@ -3321,6 +3326,50 @@ mod tests {
     use crate::input::{EditorMode, InputMode, TextareaMode};
 
     struct TestRoot<M: InputModeKind>(Entity<InputBaseState<M>>);
+
+    #[gpui::test]
+    fn submit_on_enter_keystroke_keeps_the_draft_unchanged(cx: &mut TestAppContext) {
+        use std::{cell::Cell, rc::Rc};
+        let view = InputView::build_textarea(cx, |state| state.submit_on_enter(true));
+        let mut cx = VisualTestContext::from_window(view.window_handle.into(), cx);
+        let submissions = Rc::new(Cell::new(0));
+        let count = submissions.clone();
+        let _subscription = cx.update(|window, cx| {
+            view.input.update(cx, |state, cx| {
+                state.set_value("private draft", window, cx);
+                state.set_selected_range(13..13, cx);
+                state.focus(window, cx);
+            });
+            let subscription = cx.subscribe(&view.input, move |_, event, _| {
+                if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
+                    count.set(count.get() + 1);
+                }
+            });
+            window.draw(cx).clear(cx);
+            subscription
+        });
+        cx.simulate_keystrokes("enter");
+        assert_eq!(submissions.get(), 1);
+        view.input
+            .read_with(&cx, |state, _| assert_eq!(state.value(), "private draft"));
+    }
+
+    #[gpui::test]
+    fn submit_on_enter_shift_keystroke_inserts_one_line_break(cx: &mut TestAppContext) {
+        let view = InputView::build_textarea(cx, |state| state.submit_on_enter(true));
+        let mut cx = VisualTestContext::from_window(view.window_handle.into(), cx);
+        cx.update(|window, cx| {
+            view.input.update(cx, |state, cx| {
+                state.set_value("draft", window, cx);
+                state.set_selected_range(5..5, cx);
+                state.focus(window, cx);
+            });
+            window.draw(cx).clear(cx);
+        });
+        cx.simulate_keystrokes("shift-enter");
+        view.input
+            .read_with(&cx, |state, _| assert_eq!(state.value(), "draft\n"));
+    }
 
     #[gpui::test]
     fn grapheme_arrow_movement_keeps_user_characters_whole(cx: &mut TestAppContext) {

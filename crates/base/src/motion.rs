@@ -141,6 +141,12 @@ impl Transition {
         self.easing.sample(progress)
     }
 
+    /// The duration scaled by `factor`. Scaled through `f32`, 100ms by 1.0 came out
+    /// 100.000001ms, so a transition was still running once its whole duration had passed.
+    fn scaled_duration(&self, factor: f32) -> Duration {
+        self.duration.mul_f64(f64::from(factor))
+    }
+
     fn progress(&self, elapsed: Duration, duration: Duration) -> (f32, MotionStatus) {
         let Some(active_elapsed) = self.delay.active_elapsed(elapsed) else {
             return (0.0, MotionStatus::Delayed);
@@ -314,7 +320,7 @@ where
         } else {
             1.0
         };
-        let duration = policy.duration.mul_f32(reversing_factor);
+        let duration = policy.scaled_duration(reversing_factor);
         state.update(cx, |state, _| {
             state.from = sampled.clone();
             state.target = target.clone();
@@ -900,6 +906,12 @@ mod tests {
             cx.run_until_parked();
             *self.samples.borrow().last().unwrap()
         }
+    }
+
+    #[test]
+    fn scaling_keeps_a_whole_duration_exact() {
+        let policy = Transition::new(Duration::from_millis(100));
+        assert_eq!(policy.scaled_duration(1.0), Duration::from_millis(100));
     }
 
     #[gpui::test]

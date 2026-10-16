@@ -3510,6 +3510,55 @@ mod tests {
         }
     }
 
+    /// The text the input drew for its first row, that row's width and the field's width.
+    fn first_row<M: InputModeKind>(
+        view: &InputView<M>,
+        cx: &mut TestAppContext,
+        width: f32,
+    ) -> (SharedString, Pixels, Pixels) {
+        let mut cx = VisualTestContext::from_window(view.window_handle.into(), cx);
+        cx.simulate_resize(gpui::size(px(width), px(200.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        view.input.read_with(&cx, |state, _| {
+            let layout = state.last_layout.as_ref().expect("the input was laid out");
+            let row = &layout.lines[0].wrapped_lines[0];
+            (row.text.clone(), row.width, layout.content_width)
+        })
+    }
+
+    const LONG_PLACEHOLDER: &str = "Explain how this repository is laid out, folder by folder";
+
+    #[gpui::test]
+    fn should_end_a_placeholder_too_wide_for_a_text_area_with_an_ellipsis(cx: &mut TestAppContext) {
+        let view = InputView::build_textarea(cx, |state| state.placeholder(LONG_PLACEHOLDER));
+
+        let (text, width, field) = first_row(&view, cx, 160.);
+
+        assert!(text.ends_with('…'), "the placeholder drawn: {text}");
+        assert!(width <= field, "the row is {width:?} in a {field:?} field");
+    }
+
+    #[gpui::test]
+    fn should_end_a_placeholder_too_wide_for_a_text_field_with_an_ellipsis(
+        cx: &mut TestAppContext,
+    ) {
+        let view = InputView::build(cx, |state| state.placeholder(LONG_PLACEHOLDER));
+
+        let (text, width, field) = first_row(&view, cx, 160.);
+
+        assert!(text.ends_with('…'), "the placeholder drawn: {text}");
+        assert!(width <= field, "the row is {width:?} in a {field:?} field");
+    }
+
+    #[gpui::test]
+    fn should_draw_a_placeholder_that_fits_whole(cx: &mut TestAppContext) {
+        let view = InputView::build_textarea(cx, |state| state.placeholder(LONG_PLACEHOLDER));
+
+        let (text, _, _) = first_row(&view, cx, 2000.);
+
+        assert_eq!(text.as_ref(), LONG_PLACEHOLDER);
+    }
+
     #[gpui::test]
     fn only_a_multi_line_input_paints_scrollbars(cx: &mut TestAppContext) {
         cx.update(crate::init);

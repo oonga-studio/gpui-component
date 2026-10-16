@@ -6,10 +6,10 @@ use gpui::{
     GlobalElementId,
 };
 use gpui::{
-    HighlightStyle, Hitbox, HitboxBehavior, Hsla, InteractiveElement, IntoElement, LayoutId,
+    Font, HighlightStyle, Hitbox, HitboxBehavior, Hsla, InteractiveElement, IntoElement, LayoutId,
     MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement as _, Path, Pixels, Point, Position,
     ShapedLine, SharedString, Size, Style, Styled as _, TextAlign, TextRun, TextStyle,
-    UnderlineStyle, Window, fill, point, px, relative, size,
+    TruncateFrom, UnderlineStyle, Window, fill, point, px, relative, size,
 };
 use ropey::Rope;
 use smallvec::SmallVec;
@@ -1770,15 +1770,26 @@ impl<M: InputModeKind> Element for TextElement<M> {
         let multi_line = state.is_multi_line();
         let text = state.text.clone();
         let is_empty = text.len() == 0;
-        let placeholder = self.placeholder.clone();
 
         let text_style = window.text_style();
         let disabled = state.disabled;
         let dim = |color: Hsla| if disabled { color.opacity(0.5) } else { color };
         let fg = dim(text_style.color);
+
+        // Calculate the width of the line numbers
+        let (line_number_width, line_number_len) =
+            Self::layout_line_numbers(&state, &text, text_size, &text_style, window);
+
         let (display_text, text_color) = if is_empty {
+            let placeholder = fit_placeholder(
+                &self.placeholder,
+                bounds.size.width - line_number_width,
+                text_style.font(),
+                text_size,
+                window,
+            );
             (
-                &Rope::from(placeholder.as_str()),
+                &Rope::from(placeholder.as_ref()),
                 dim(state.editor_style.muted_foreground),
             )
         } else if state.masked {
@@ -1789,10 +1800,6 @@ impl<M: InputModeKind> Element for TextElement<M> {
         } else {
             (&text, fg)
         };
-
-        // Calculate the width of the line numbers
-        let (line_number_width, line_number_len) =
-            Self::layout_line_numbers(&state, &text, text_size, &text_style, window);
 
         let mut bounds = bounds;
         let wrap_width = if multi_line && state.soft_wrap {
@@ -2491,6 +2498,56 @@ impl<M: InputModeKind> Element for TextElement<M> {
 
         self.paint_mouse_listeners(window, cx);
     }
+}
+
+/// `placeholder` with each line too wide for `width` cut short and ended with an ellipsis, so a
+/// narrow field shows where its placeholder goes on instead of a glyph cut at the field's edge.
+fn fit_placeholder(
+    placeholder: &SharedString,
+    width: Pixels,
+    font: Font,
+    font_size: Pixels,
+    window: &Window,
+) -> SharedString {
+    let run = |len| TextRun {
+        len,
+        font: font.clone(),
+        color: Hsla::default(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    // Shape first: the truncation below sums per-character advances, which overestimates a shaped
+    // line, so it would cut one that fits.
+    let fits = |line: &str| {
+        window
+            .text_system()
+            .shape_line(line.to_string().into(), font_size, &[run(line.len())], None)
+            .width
+            <= width
+    };
+    if placeholder.split('\n').all(fits) {
+        return placeholder.clone();
+    }
+    let mut wrapper = window.text_system().line_wrapper(font.clone(), font_size);
+    placeholder
+        .split('\n')
+        .map(|line| {
+            if fits(line) {
+                return line.to_string();
+            }
+            let (fitted, _) = wrapper.truncate_line(
+                line.to_string().into(),
+                width,
+                "…",
+                &[run(line.len())],
+                TruncateFrom::End,
+            );
+            fitted.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .into()
 }
 
 /// Split placeholder text into display lines and trim runs to each line.

@@ -31,8 +31,8 @@ gpui_macros.workspace = true
 instant.workspace = true
 lsp-types.workspace = true
 markdown = { version = "1.0.0", features = ["serde"] }
-html5ever = "0.27"
-markup5ever_rcdom = "0.3.0"
+html5ever = "0.38"
+markup5ever_rcdom = "0.38"
 ropey.workspace = true
 regex = "1"
 schemars.workspace = true

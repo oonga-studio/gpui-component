@@ -72,6 +72,35 @@ impl NotificationDelivery {
     }
 }
 
+/// Which way a notification leaves when it closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NotificationExit {
+    /// Back toward the edge of its placement: up for a top placement, down for a bottom one.
+    #[default]
+    Placement,
+    /// Sideways, toward the right edge of the window.
+    Right,
+}
+
+/// How far a closing notification has moved, as `(x, y)`, `delta` of the way through its exit.
+fn exit_offset(exit: NotificationExit, placement: Anchor, delta: f32) -> (Pixels, Pixels) {
+    match exit {
+        NotificationExit::Right => (NOTIFICATION_TRANSITION_OFFSET * delta, px(0.)),
+        NotificationExit::Placement => {
+            let y = match placement {
+                Anchor::TopLeft | Anchor::TopRight | Anchor::TopCenter => {
+                    NOTIFICATION_TRANSITION_OFFSET * -delta
+                }
+                Anchor::BottomLeft | Anchor::BottomRight | Anchor::BottomCenter => {
+                    NOTIFICATION_TRANSITION_OFFSET * delta
+                }
+                _ => px(0.),
+            };
+            (px(0.), y)
+        }
+    }
+}
+
 /// Namespaces the library's system-notification tags away from tags the
 /// application posts itself, so the response handler can tell them apart.
 const SYSTEM_TAG_PREFIX: &str = "gpui-component/notification/";
@@ -116,6 +145,7 @@ pub struct Notification {
     message: Option<SharedString>,
     icon: Option<Icon>,
     placement: Option<Anchor>,
+    exit: NotificationExit,
     delivery: Option<NotificationDelivery>,
     autohide: bool,
     action_builder: Option<Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>) -> Button>>,
@@ -176,6 +206,7 @@ impl Notification {
             type_: None,
             icon: None,
             placement: None,
+            exit: NotificationExit::Placement,
             delivery: None,
             autohide: true,
             action_builder: None,
@@ -265,6 +296,13 @@ impl Notification {
     /// Notifications are stacked separately for each placement.
     pub fn placement(mut self, placement: Anchor) -> Self {
         self.placement = Some(placement);
+        self
+    }
+
+    /// Set which way the notification leaves when it closes, default
+    /// [`NotificationExit::Placement`].
+    pub fn exit(mut self, exit: NotificationExit) -> Self {
+        self.exit = exit;
         self
     }
 
@@ -411,6 +449,7 @@ impl Render for Notification {
         };
         let has_icon = icon.is_some();
         let placement = self.placement.unwrap_or(cx.theme().notification.placement);
+        let exit = self.exit;
 
         BaseToast::new("notification")
             .transition_status(transition_status)
@@ -485,17 +524,11 @@ impl Render for Notification {
                 move |this, delta| {
                     if closing {
                         let opacity = 1. - delta;
-                        let that = this.opacity(opacity).shadow(toast_shadow(opacity.powi(3)));
-                        let y_offset = match placement {
-                            Anchor::TopLeft | Anchor::TopRight | Anchor::TopCenter => {
-                                -delta * NOTIFICATION_TRANSITION_OFFSET
-                            }
-                            Anchor::BottomLeft | Anchor::BottomRight | Anchor::BottomCenter => {
-                                delta * NOTIFICATION_TRANSITION_OFFSET
-                            }
-                            _ => px(0.),
-                        };
-                        that.top(y_offset)
+                        let (x_offset, y_offset) = exit_offset(exit, placement, delta);
+                        this.opacity(opacity)
+                            .shadow(toast_shadow(opacity.powi(3)))
+                            .top(y_offset)
+                            .left(x_offset)
                     } else {
                         let y_offset = match placement {
                             Anchor::TopLeft | Anchor::TopRight | Anchor::TopCenter => {
@@ -1074,6 +1107,42 @@ mod tests {
         cx.background_executor
             .advance_clock(NOTIFICATION_EXIT_DURATION + Duration::from_millis(50));
         cx.run_until_parked();
+    }
+
+    #[test]
+    fn exit_leaves_toward_the_top_edge_it_came_from() {
+        assert_eq!(
+            exit_offset(NotificationExit::Placement, Anchor::TopRight, 0.5),
+            (px(0.), NOTIFICATION_TRANSITION_OFFSET * -0.5)
+        );
+    }
+
+    #[test]
+    fn exit_leaves_toward_the_bottom_edge_it_came_from() {
+        assert_eq!(
+            exit_offset(NotificationExit::Placement, Anchor::BottomLeft, 0.5),
+            (px(0.), NOTIFICATION_TRANSITION_OFFSET * 0.5)
+        );
+    }
+
+    #[test]
+    fn exit_to_the_right_moves_the_card_sideways_only() {
+        assert_eq!(
+            exit_offset(NotificationExit::Right, Anchor::TopRight, 0.5),
+            (NOTIFICATION_TRANSITION_OFFSET * 0.5, px(0.))
+        );
+    }
+
+    #[test]
+    fn exit_defaults_to_the_placement_edge() {
+        assert_eq!(Notification::new().exit, NotificationExit::Placement);
+    }
+
+    #[test]
+    fn exit_builder_sets_the_way_out() {
+        let note = Notification::new().exit(NotificationExit::Right);
+
+        assert_eq!(note.exit, NotificationExit::Right);
     }
 
     #[test]

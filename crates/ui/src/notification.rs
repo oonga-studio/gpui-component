@@ -1,8 +1,8 @@
 use std::{any::TypeId, borrow::Cow, collections::HashMap, rc::Rc, time::Duration};
 
 use gpui::{
-    Anchor, Animation, AnimationExt, AnyElement, AnyWindowHandle, App, AppContext, ClickEvent,
-    Context, DismissEvent, ElementId, Entity, EventEmitter, FocusHandle, Global,
+    Anchor, Animation, AnimationExt, AnyElement, AnyView, AnyWindowHandle, App, AppContext,
+    ClickEvent, Context, DismissEvent, ElementId, Entity, EventEmitter, FocusHandle, Global,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString,
     StatefulInteractiveElement, StyleRefinement, Styled, Subscription, SystemNotification,
     SystemNotificationResponse, WeakEntity, Window, WindowId, div, prelude::FluentBuilder, px,
@@ -150,6 +150,7 @@ pub struct Notification {
     autohide: bool,
     action_builder: Option<Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>) -> Button>>,
     content_builder: Option<Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>) -> AnyElement>>,
+    content_view: Option<AnyView>,
     on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
     on_close: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
     transition_status: ToastTransitionStatus,
@@ -211,6 +212,7 @@ impl Notification {
             autohide: true,
             action_builder: None,
             content_builder: None,
+            content_view: None,
             on_click: None,
             on_close: None,
             transition_status: ToastTransitionStatus::Starting,
@@ -419,6 +421,17 @@ impl Notification {
         self.content_builder = Some(Rc::new(content));
         self
     }
+
+    /// Set the content of the notification to a view, which [`Self::view`] reads back.
+    pub fn content_view(mut self, view: impl Into<AnyView>) -> Self {
+        self.content_view = Some(view.into());
+        self
+    }
+
+    /// The view set by [`Self::content_view`].
+    pub fn view(&self) -> Option<&AnyView> {
+        self.content_view.as_ref()
+    }
 }
 
 impl EventEmitter<DismissEvent> for Notification {}
@@ -481,7 +494,8 @@ impl Render for Notification {
                     .when_some(self.message.clone(), |this, message| {
                         this.child(div().text_sm().child(message))
                     })
-                    .when_some(content, |this, content| this.child(content)),
+                    .when_some(content, |this, content| this.child(content))
+                    .when_some(self.content_view.clone(), |this, view| this.child(view)),
             )
             .when_some(action, |this, action| this.child(action))
             .child(
@@ -1247,6 +1261,39 @@ mod tests {
         flush_dismiss(cx);
 
         assert_eq!(right_id(cx), before);
+    }
+
+    struct Card(&'static str);
+
+    impl Render for Card {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().child(self.0)
+        }
+    }
+
+    #[gpui::test]
+    fn content_view_reads_back_from_the_shown_notification(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let (root, cx) = cx.add_window_view(|window, cx| TestRoot {
+            list: cx.new(|cx| NotificationList::new(window, cx)),
+            other_focus: cx.focus_handle(),
+        });
+        let list = root.read_with(cx, |root, _| root.list.clone());
+
+        list.update_in(cx, |list, window, cx| {
+            let card = cx.new(|_| Card("saved"));
+            list.push(Notification::new().content_view(card), window, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let shown = list.read_with(cx, |list, cx| {
+            list.notifications()
+                .iter()
+                .filter_map(|note| note.read(cx).view()?.clone().downcast::<Card>().ok())
+                .map(|card| card.read(cx).0)
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(shown, ["saved"]);
     }
 
     #[gpui::test]

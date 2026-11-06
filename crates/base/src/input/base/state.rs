@@ -3371,6 +3371,73 @@ mod tests {
             .read_with(&cx, |state, _| assert_eq!(state.value(), "draft\n"));
     }
 
+    /// A parent that records each key reaching it, as an app's own shortcuts would.
+    struct KeyWitness {
+        input: Entity<InputBaseState<InputMode>>,
+        heard: std::rc::Rc<std::cell::RefCell<Vec<gpui::Keystroke>>>,
+    }
+
+    impl Render for KeyWitness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let heard = self.heard.clone();
+            div()
+                .size_full()
+                .on_key_down(move |event: &KeyDownEvent, _, _| {
+                    heard.borrow_mut().push(event.keystroke.clone());
+                })
+                .child(self.input.clone())
+        }
+    }
+
+    /// The keys a focused single-line input with no search passes to its parent.
+    fn keys_passed_on(cx: &mut TestAppContext, keys: &str) -> Vec<(bool, bool, String)> {
+        let heard = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut input = None;
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                cx.set_global(Theme::default());
+                super::super::init(cx);
+                let state = cx.new(|cx| crate::input::InputState::new(window, cx));
+                input = Some(state.clone());
+                cx.new(|_| KeyWitness {
+                    input: state,
+                    heard: heard.clone(),
+                })
+            })
+            .unwrap()
+        });
+        let input = input.unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| state.focus(window, cx));
+            window.draw(cx).clear(cx);
+        });
+        cx.simulate_keystrokes(keys);
+        heard
+            .borrow()
+            .iter()
+            .map(|k| (k.modifiers.platform, k.modifiers.shift, k.key.clone()))
+            .collect()
+    }
+
+    #[gpui::test]
+    fn should_pass_on_the_replace_chord_when_the_input_has_no_search(cx: &mut TestAppContext) {
+        // Act
+        let heard = keys_passed_on(cx, "cmd-shift-f");
+
+        // Assert
+        assert_eq!(heard, vec![(true, true, "f".to_string())]);
+    }
+
+    #[gpui::test]
+    fn should_pass_on_the_search_chord_when_the_input_has_no_search(cx: &mut TestAppContext) {
+        // Act
+        let heard = keys_passed_on(cx, "cmd-f");
+
+        // Assert
+        assert_eq!(heard, vec![(true, false, "f".to_string())]);
+    }
+
     #[gpui::test]
     fn grapheme_arrow_movement_keeps_user_characters_whole(cx: &mut TestAppContext) {
         let view = InputView::build(cx, |state| state);

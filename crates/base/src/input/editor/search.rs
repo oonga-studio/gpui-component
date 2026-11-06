@@ -195,8 +195,11 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.search_session.matcher.update(&self.text);
     }
 
+    // An input with no search passes the chord on, so an app can bind it (as `indent()` and the
+    // code-actions toggle do).
     pub(super) fn on_action_search(&mut self, _: &Search, _: &mut Window, cx: &mut Context<Self>) {
         if !self.searchable {
+            cx.propagate();
             return;
         }
         self.open_search(false, cx);
@@ -209,6 +212,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         cx: &mut Context<Self>,
     ) {
         if !self.searchable {
+            cx.propagate();
             return;
         }
         self.open_search(true, cx);

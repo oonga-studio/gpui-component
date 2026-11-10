@@ -5850,6 +5850,143 @@ mod tests {
             px(0.)
         );
     }
+
+    // --- A text area draws its rows inside the box they scroll in, clear of its padding ---
+
+    /// The padding [`pad_and_scroll`] puts above and below an input's rows.
+    const PADDING: Pixels = px(8.);
+
+    /// Give `input` [`PADDING`] above and below its rows and thirty lines to hold, and show its
+    /// caret unfocused at the start of line `caret_line` (the first is 1). Then scroll the view
+    /// `rows_down` rows from its first.
+    fn pad_and_scroll<M: InputModeKind>(
+        input: &Entity<InputBaseState<M>>,
+        cx: &mut VisualTestContext,
+        caret_line: usize,
+        rows_down: f32,
+    ) {
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.caret_always = true;
+                state.set_editor_paddings(Edges {
+                    top: PADDING,
+                    bottom: PADDING,
+                    ..Default::default()
+                });
+                state.insert(short_lines(30), window, cx);
+                let caret = short_lines(caret_line - 1).len() + usize::from(caret_line > 1);
+                state.move_cursor_to(caret, cx);
+            })
+        });
+        settle(cx);
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| {
+                let row = state.last_layout.as_ref().expect("laid out").line_height;
+                state.set_scroll_offset(point(px(0.), -row * rows_down), cx)
+            })
+        });
+        settle(cx);
+    }
+
+    /// A text area ten rows high, padded and scrolled as [`pad_and_scroll`] does.
+    fn padded_text_area(
+        cx: &mut TestAppContext,
+        caret_line: usize,
+        rows_down: f32,
+    ) -> (TextArea, VisualTestContext) {
+        let (input, mut cx) = growing_text_area(cx, 10);
+        pad_and_scroll(&input, &mut cx, caret_line, rows_down);
+        (input, cx)
+    }
+
+    /// The part of the caret the last frame shows, in device pixels; `None` when it shows none.
+    fn caret_shown<M: InputModeKind>(
+        input: &Entity<InputBaseState<M>>,
+        cx: &mut VisualTestContext,
+    ) -> Option<Bounds<gpui::ScaledPixels>> {
+        let caret = input.read_with(cx, |state, _| {
+            gpui::Background::from(state.editor_style.caret)
+        });
+        cx.update(|window, _| {
+            window
+                .painted_quads()
+                .into_iter()
+                .find(|quad| quad.background == caret)
+                .map(|quad| quad.bounds.intersect(&quad.content_mask.bounds))
+        })
+    }
+
+    /// The top and bottom of the box the input's rows scroll in, in whole device pixels.
+    fn rows_top_and_bottom<M: InputModeKind>(
+        input: &Entity<InputBaseState<M>>,
+        cx: &mut VisualTestContext,
+    ) -> (gpui::ScaledPixels, gpui::ScaledPixels) {
+        let rows = input.read_with(cx, |state, _| state.input_bounds);
+        let rows = cx.update(|window, _| rows.scale(window.scale_factor()));
+        (rows.top().round(), rows.bottom().round())
+    }
+
+    #[gpui::test]
+    fn should_draw_no_caret_for_the_row_under_the_last_a_text_area_shows(cx: &mut TestAppContext) {
+        // Arrange: rows one to ten show whole, and the caret is on the eleventh.
+        let (input, mut cx) = padded_text_area(cx, 11, 0.);
+
+        // Act
+        let caret = caret_shown(&input, &mut cx);
+
+        // Assert
+        assert_eq!(caret, None);
+    }
+
+    #[gpui::test]
+    fn should_cut_a_row_half_under_a_text_areas_rows_at_their_bottom(cx: &mut TestAppContext) {
+        // Arrange: the eleventh row, the caret's, is half in view at the bottom.
+        let (input, mut cx) = padded_text_area(cx, 11, 0.5);
+        let (_, bottom) = rows_top_and_bottom(&input, &mut cx);
+
+        // Act
+        let caret = caret_shown(&input, &mut cx).expect("the caret is drawn");
+
+        // Assert
+        assert_eq!(caret.bottom().round(), bottom);
+    }
+
+    #[gpui::test]
+    fn should_cut_a_row_half_over_a_text_areas_rows_at_their_top(cx: &mut TestAppContext) {
+        // Arrange: the first row, the caret's, is half in view at the top.
+        let (input, mut cx) = padded_text_area(cx, 1, 0.5);
+        let (top, _) = rows_top_and_bottom(&input, &mut cx);
+
+        // Act
+        let caret = caret_shown(&input, &mut cx).expect("the caret is drawn");
+
+        // Assert
+        assert_eq!(caret.top().round(), top);
+    }
+
+    #[gpui::test]
+    fn should_let_a_code_editors_rows_scroll_through_its_padding(cx: &mut TestAppContext) {
+        // Arrange: a code editor with room for ten rows; the eleventh, the caret's, is half in
+        // view.
+        let view = InputView::new(cx);
+        let mut cx = VisualTestContext::from_window(view.window_handle.into(), cx);
+        settle(&mut cx);
+        let row = view.input.read_with(&cx, |state, _| {
+            state.last_layout.as_ref().expect("laid out").line_height
+        });
+        cx.simulate_resize(gpui::size(px(400.), row * 10. + PADDING * 2.));
+        settle(&mut cx);
+        pad_and_scroll(&view.input, &mut cx, 11, 0.5);
+        let (_, bottom) = rows_top_and_bottom(&view.input, &mut cx);
+
+        // Act
+        let caret = caret_shown(&view.input, &mut cx).expect("the caret is drawn");
+
+        // Assert
+        assert!(caret.bottom().round() > bottom);
+    }
 }
 
 /// Methods that only a single-line input offers.

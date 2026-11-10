@@ -2,7 +2,7 @@ use crate::input::{InputExtras as _, InputModeKind};
 use gpui::Corners;
 use gpui::Half;
 use gpui::{
-    AnyElement, App, Bounds, Edges, Element, ElementId, ElementInputHandler, Entity,
+    AnyElement, App, Bounds, ContentMask, Edges, Element, ElementId, ElementInputHandler, Entity,
     GlobalElementId,
 };
 use gpui::{
@@ -286,6 +286,18 @@ fn clamp_auto_grow_vertical_scroll_offset(
         scroll_top.clamp((input_height - scroll_height).min(px(0.)), px(0.))
     } else {
         scroll_top
+    }
+}
+
+/// The window's content mask cut to the top and bottom of `rows`, the box an input's rows
+/// scroll in.
+fn rows_mask(rows: Bounds<Pixels>, window: &Window) -> ContentMask<Pixels> {
+    let around = window.content_mask().bounds;
+    ContentMask {
+        bounds: Bounds::from_corners(
+            point(around.left(), rows.top()),
+            point(around.right(), rows.bottom()),
+        ),
     }
 }
 
@@ -2166,6 +2178,28 @@ impl<M: InputModeKind> Element for TextElement<M> {
         input_bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
         prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        // A text area keeps its padding clear: a row is laid out past the last it shows
+        // (`calculate_visible_range`), and a row scrolled half out of view reaches into it. A
+        // code editor's rows scroll through its padding, under the gutter.
+        let clears_padding = {
+            let state = self.state.read(cx);
+            state.is_multi_line() && !state.is_code_editor()
+        };
+        let rows = clears_padding.then(|| rows_mask(input_bounds, window));
+        window.with_content_mask(rows, |window| {
+            self.paint_input(input_bounds, prepaint, window, cx)
+        });
+    }
+}
+
+impl<M: InputModeKind> TextElement<M> {
+    fn paint_input(
+        &mut self,
+        input_bounds: Bounds<Pixels>,
+        prepaint: &mut PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {

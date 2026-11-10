@@ -764,6 +764,12 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.editor_paddings = paddings;
     }
 
+    /// The presentation padding round multi-line text, as [`Self::set_editor_paddings`] set it.
+    #[doc(hidden)]
+    pub fn editor_paddings(&self) -> Edges<Pixels> {
+        self.editor_paddings
+    }
+
     pub fn apply_highlighter_fold_candidates(
         &mut self,
         candidates: Vec<crate::input::FoldRange>,
@@ -2011,6 +2017,56 @@ impl<M: InputModeKind> InputBaseState<M> {
         scroll_offset.y = scroll_offset.y.clamp(safe_y_min, px(0.));
         self.deferred_scroll_offset = Some(scroll_offset);
         cx.notify();
+    }
+
+    /// Aim this frame's scroll at the caret's row where the row would be left out of view.
+    /// `prepaint` calls it with the frame's row height and the height the text draws in, before
+    /// it works out which rows to lay out.
+    ///
+    /// Two things leave the row outside. A selection that jumped further than the one row
+    /// `layout_cursor` follows: a paste, one large insert, a new value with the caret moved to
+    /// its end. [`Self::scroll_to`] cannot place those, as it reads the layout from before the
+    /// change. And a text area that got shorter under a caret it was showing. A view scrolled off
+    /// the caret stays where it is while the selection holds.
+    pub(super) fn aim_scroll_at_caret_row(&mut self, line_height: Pixels, viewport_height: Pixels) {
+        // A row within half a pixel of an edge counts as inside it.
+        const SLACK: Pixels = px(0.5);
+        if self.is_single_line() || viewport_height <= px(0.) {
+            return;
+        }
+        let row_top = line_height * self.cursor_display_row();
+        let row_bottom = row_top + line_height;
+        let shown = self.scroll_handle.offset();
+        let last_height = self.input_bounds.size.height;
+
+        let jumped = self.selection_moved() && !self.auto_scroll.is_active();
+        let squeezed = viewport_height < last_height
+            && row_top >= -shown.y - SLACK
+            && row_bottom <= -shown.y + last_height + SLACK;
+        if !jumped && !squeezed {
+            return;
+        }
+
+        let aimed = self.deferred_scroll_offset.unwrap_or(shown);
+        let y = if row_top < -aimed.y - SLACK {
+            -row_top
+        } else if row_bottom > -aimed.y + viewport_height + SLACK {
+            viewport_height - row_bottom
+        } else {
+            return;
+        };
+        self.deferred_scroll_offset = Some(point(aimed.x, y.min(px(0.))));
+    }
+
+    /// Whether the selection differs from the one the last frame drew, as `layout_cursor` asks
+    /// before it follows the caret: the end of the IME's marked text stands for the selection,
+    /// and a selection of the whole text never counts.
+    fn selection_moved(&self) -> bool {
+        let mut selected = self.selected_range;
+        if let Some(marked) = &self.ime_marked_range {
+            selected = (marked.end..marked.end).into();
+        }
+        self.last_selected_range != Some(selected) && selected.len() != self.text.len()
     }
 
     pub(super) fn show_character_palette(
@@ -5539,6 +5595,261 @@ mod tests {
             });
         });
     }
+
+    // --- The caret's row stays in view when the selection jumps or the input gets shorter ---
+
+    type TextArea = Entity<InputBaseState<TextareaMode>>;
+
+    /// A root that leaves the input its own height at the top of a column, as a form does;
+    /// [`TestRoot`] stretches it to the window's.
+    struct TopRoot(TextArea);
+
+    impl Render for TopRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(div().w_full().flex_shrink_0().child(self.0.clone()))
+        }
+    }
+
+    /// `count` short lines, the caret left after the last.
+    fn short_lines(count: usize) -> String {
+        (1..=count)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Draw the window until nothing asks for another frame.
+    fn settle(cx: &mut VisualTestContext) {
+        for _ in 0..3 {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.run_until_parked();
+        }
+    }
+
+    /// A text area that grows to `max_rows` and no taller, in a window with room for more, drawn.
+    fn growing_text_area(
+        cx: &mut TestAppContext,
+        max_rows: usize,
+    ) -> (TextArea, VisualTestContext) {
+        let mut input = None;
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                cx.set_global(Theme::default());
+                super::super::init(cx);
+                let state = cx
+                    .new(|cx| crate::input::TextareaState::new(window, cx).auto_grow(1, max_rows));
+                input = Some(state.clone());
+                cx.new(|_| TopRoot(state))
+            })
+            .unwrap()
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(gpui::size(px(400.), px(900.)));
+        settle(&mut cx);
+        (input.unwrap(), cx)
+    }
+
+    /// Whether the last frame drew the caret's row wholly inside the input.
+    fn caret_row_in_view(input: &TextArea, cx: &mut VisualTestContext) -> bool {
+        input.read_with(cx, |state, _| {
+            let caret = state.cursor();
+            let rows = state.input_bounds;
+            state.range_to_bounds(&(caret..caret)).is_some_and(|row| {
+                row.top() >= rows.top() - px(0.5) && row.bottom() <= rows.bottom() + px(0.5)
+            })
+        })
+    }
+
+    /// How many rows high the input drew in the last frame.
+    fn rows_drawn(input: &TextArea, cx: &mut VisualTestContext) -> f32 {
+        input.read_with(cx, |state, _| {
+            let line_height = state.last_layout.as_ref().expect("laid out").line_height;
+            state.input_bounds.size.height / line_height
+        })
+    }
+
+    #[gpui::test]
+    fn should_show_the_caret_row_when_a_paste_is_taller_than_the_input(cx: &mut TestAppContext) {
+        // Arrange
+        let (input, mut cx) = growing_text_area(cx, 10);
+        cx.write_to_clipboard(ClipboardItem::new_string(short_lines(60)));
+
+        // Act
+        cx.update(|window, cx| input.update(cx, |state, cx| state.paste(&Paste, window, cx)));
+        settle(&mut cx);
+
+        // Assert
+        assert!(caret_row_in_view(&input, &mut cx));
+    }
+
+    #[gpui::test]
+    fn should_show_the_caret_row_when_one_insert_is_taller_than_the_input(cx: &mut TestAppContext) {
+        // Arrange
+        let (input, mut cx) = growing_text_area(cx, 10);
+
+        // Act
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| state.insert(short_lines(60), window, cx))
+        });
+        settle(&mut cx);
+
+        // Assert
+        assert!(caret_row_in_view(&input, &mut cx));
+    }
+
+    #[gpui::test]
+    fn should_show_the_caret_row_when_the_caret_moves_to_the_end_of_a_new_value(
+        cx: &mut TestAppContext,
+    ) {
+        // Arrange
+        let (input, mut cx) = growing_text_area(cx, 10);
+        let value = short_lines(30);
+
+        // Act
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_value(value.clone(), window, cx);
+                state.move_cursor_to(value.len(), cx);
+            })
+        });
+        settle(&mut cx);
+
+        // Assert
+        assert!(caret_row_in_view(&input, &mut cx));
+    }
+
+    #[gpui::test]
+    fn should_show_the_caret_row_when_a_paste_is_taller_than_a_text_area_of_fixed_height(
+        cx: &mut TestAppContext,
+    ) {
+        // Arrange: this root gives the text area its window's height.
+        cx.update(crate::init);
+        let view = InputView::build_textarea(cx, |state| state);
+        let mut cx = VisualTestContext::from_window(view.window_handle.into(), cx);
+        cx.simulate_resize(gpui::size(px(400.), px(200.)));
+        settle(&mut cx);
+        cx.write_to_clipboard(ClipboardItem::new_string(short_lines(60)));
+
+        // Act
+        cx.update(|window, cx| {
+            view.input
+                .update(cx, |state, cx| state.paste(&Paste, window, cx))
+        });
+        settle(&mut cx);
+
+        // Assert
+        assert!(caret_row_in_view(&view.input, &mut cx));
+    }
+
+    #[gpui::test]
+    fn should_keep_the_caret_row_in_view_when_the_row_limit_drops(cx: &mut TestAppContext) {
+        // Arrange: twenty rows show whole, the caret on the last.
+        let (input, mut cx) = growing_text_area(cx, 20);
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| state.insert(short_lines(20), window, cx))
+        });
+        settle(&mut cx);
+
+        // Act
+        cx.update(|_, cx| input.update(cx, |state, cx| state.set_auto_grow(1, 5, cx)));
+        settle(&mut cx);
+
+        // Assert
+        assert!(caret_row_in_view(&input, &mut cx));
+    }
+
+    #[gpui::test]
+    fn should_keep_the_rows_its_text_fills_when_the_row_limit_changes(cx: &mut TestAppContext) {
+        // Arrange
+        let (input, mut cx) = growing_text_area(cx, 20);
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| state.insert(short_lines(8), window, cx))
+        });
+        settle(&mut cx);
+
+        // Act
+        cx.update(|_, cx| input.update(cx, |state, cx| state.set_auto_grow(1, 12, cx)));
+        settle(&mut cx);
+
+        // Assert
+        assert_eq!(rows_drawn(&input, &mut cx), 8.);
+    }
+
+    #[gpui::test]
+    fn should_notify_no_one_when_the_row_limit_is_set_to_what_it_is(cx: &mut TestAppContext) {
+        use std::{cell::Cell, rc::Rc};
+
+        // Arrange
+        let (input, mut cx) = growing_text_area(cx, 10);
+        let notified = Rc::new(Cell::new(0));
+        let _watch = cx.update(|_, cx| {
+            let notified = notified.clone();
+            cx.observe(&input, move |_, _| notified.set(notified.get() + 1))
+        });
+
+        // Act
+        cx.update(|_, cx| input.update(cx, |state, cx| state.set_auto_grow(1, 10, cx)));
+        cx.run_until_parked();
+
+        // Assert
+        assert_eq!(notified.get(), 0);
+    }
+
+    /// A text area ten rows high holding thirty lines, scrolled to its first row with the caret
+    /// left after the last line.
+    fn scrolled_off_the_caret(cx: &mut TestAppContext) -> (TextArea, VisualTestContext) {
+        let (input, mut cx) = growing_text_area(cx, 10);
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| state.insert(short_lines(30), window, cx))
+        });
+        settle(&mut cx);
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| {
+                state.set_scroll_offset(point(px(0.), px(0.)), cx)
+            })
+        });
+        settle(&mut cx);
+        (input, cx)
+    }
+
+    #[gpui::test]
+    fn should_leave_a_view_scrolled_off_the_caret_alone_when_nothing_changes(
+        cx: &mut TestAppContext,
+    ) {
+        // Arrange
+        let (input, mut cx) = scrolled_off_the_caret(cx);
+
+        // Act
+        settle(&mut cx);
+
+        // Assert
+        assert_eq!(
+            input.read_with(&cx, |state, _| state.scroll_offset().y),
+            px(0.)
+        );
+    }
+
+    #[gpui::test]
+    fn should_leave_a_view_scrolled_off_the_caret_alone_when_the_row_limit_drops(
+        cx: &mut TestAppContext,
+    ) {
+        // Arrange
+        let (input, mut cx) = scrolled_off_the_caret(cx);
+
+        // Act
+        cx.update(|_, cx| input.update(cx, |state, cx| state.set_auto_grow(1, 5, cx)));
+        settle(&mut cx);
+
+        // Assert
+        assert_eq!(
+            input.read_with(&cx, |state, _| state.scroll_offset().y),
+            px(0.)
+        );
+    }
 }
 
 /// Methods that only a single-line input offers.
@@ -5747,8 +6058,18 @@ impl InputBaseState<crate::input::TextareaMode> {
         Self::new_in_mode(window, cx)
     }
 
+    /// Change the rows the text area grows between. The text keeps the rows it fills, up to the
+    /// new limit. Setting the limits it already has does nothing.
     pub fn set_auto_grow(&mut self, min_rows: usize, max_rows: usize, cx: &mut Context<Self>) {
-        self.mode = LayoutMode::auto_grow(min_rows, max_rows.max(min_rows));
+        let max_rows = max_rows.max(min_rows);
+        if self.mode.is_auto_grow()
+            && self.mode.min_rows() == min_rows.max(1)
+            && self.mode.max_rows() == max_rows
+        {
+            return;
+        }
+        self.mode = LayoutMode::auto_grow(min_rows, max_rows);
+        self.mode.update_auto_grow(&self.display_map);
         cx.notify();
     }
 

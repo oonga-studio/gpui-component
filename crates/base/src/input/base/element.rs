@@ -1828,9 +1828,13 @@ impl<M: InputModeKind> Element for TextElement<M> {
             });
         }
 
-        let state = self.state.read(cx);
         let line_height = row_line_height(window);
+        // Before the visible rows are worked out, so the rows round the caret are the ones laid out.
+        self.state.update(cx, |state, _| {
+            state.aim_scroll_at_caret_row(line_height, bounds.size.height)
+        });
 
+        let state = self.state.read(cx);
         let (visible_range, visible_buffer_lines, visible_top) =
             self.calculate_visible_range(&state, line_height, bounds.size.height);
         let visible_start_offset = state.text.line_start_offset(visible_range.start);

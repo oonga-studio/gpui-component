@@ -2184,10 +2184,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
         // A text area keeps its padding clear: a row is laid out past the last it shows
         // (`calculate_visible_range`), and a row scrolled half out of view reaches into it. A
         // code editor's rows scroll through its padding, under the gutter.
-        let clears_padding = {
-            let state = self.state.read(cx);
-            state.is_multi_line() && !state.is_code_editor()
-        };
+        let clears_padding = self.state.read(cx).clears_padding();
         let rows = clears_padding.then(|| rows_mask(input_bounds, window));
         window.with_content_mask(rows, |window| {
             self.paint_input(input_bounds, prepaint, window, cx)

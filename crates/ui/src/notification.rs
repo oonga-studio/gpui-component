@@ -25,6 +25,9 @@ const NOTIFICATION_EXIT_DURATION: Duration = Duration::from_millis(200);
 const NOTIFICATION_TRANSITION_OFFSET: Pixels = px(96.);
 const DEFAULT_NOTIFICATION_WIDTH: Pixels = px(382.);
 const NOTIFICATION_ADVANCE_INTERVAL: Duration = Duration::from_millis(50);
+/// How long a notification shows before it hides itself, unless [`Notification::autohide_after`]
+/// says otherwise.
+const DEFAULT_AUTOHIDE_AFTER: Duration = Duration::from_secs(5);
 struct DismissRequest;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -148,6 +151,7 @@ pub struct Notification {
     exit: NotificationExit,
     delivery: Option<NotificationDelivery>,
     autohide: bool,
+    autohide_after: Duration,
     action_builder: Option<Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>) -> Button>>,
     content_builder: Option<Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>) -> AnyElement>>,
     content_view: Option<AnyView>,
@@ -210,6 +214,7 @@ impl Notification {
             exit: NotificationExit::Placement,
             delivery: None,
             autohide: true,
+            autohide_after: DEFAULT_AUTOHIDE_AFTER,
             action_builder: None,
             content_builder: None,
             content_view: None,
@@ -353,6 +358,13 @@ impl Notification {
     /// Set the auto hide of the notification, default is true.
     pub fn autohide(mut self, autohide: bool) -> Self {
         self.autohide = autohide;
+        self
+    }
+
+    /// Set how long the notification shows before it hides itself, default 5 seconds. Only a
+    /// notification that auto hides reads it.
+    pub fn autohide_after(mut self, after: Duration) -> Self {
+        self.autohide_after = after;
         self
     }
 
@@ -860,7 +872,7 @@ impl NotificationList {
         }
 
         let id = notification.id.clone();
-        let autohide = notification.autohide;
+        let timeout = notification.autohide.then_some(notification.autohide_after);
         let window_id = window.window_handle().window_id();
 
         let notification = cx.new(|_| notification);
@@ -884,9 +896,7 @@ impl NotificationList {
         self.notifications.push(
             id,
             notification,
-            ToastOptions {
-                timeout: autohide.then_some(Duration::from_secs(5)),
-            },
+            ToastOptions { timeout },
             cx.background_executor().now(),
         );
         self.start_advancing(window, cx);
@@ -1447,6 +1457,40 @@ mod tests {
         cx.background_executor
             .advance_clock(Duration::from_secs(5) + Duration::from_millis(50));
         cx.run_until_parked();
+        assert_eq!(
+            note.read_with(cx, |note, _| note.transition_status),
+            ToastTransitionStatus::Ending
+        );
+    }
+
+    #[gpui::test]
+    fn autohide_after_sets_how_long_a_notification_shows(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let (root, cx) = cx.add_window_view(|window, cx| TestRoot {
+            list: cx.new(|cx| NotificationList::new(window, cx)),
+            other_focus: cx.focus_handle(),
+        });
+        let list = root.read_with(cx, |root, _| root.list.clone());
+        list.update_in(cx, |list, window, cx| {
+            let note = Notification::info("brief")
+                .id::<FooKind>()
+                .autohide_after(Duration::from_secs(1));
+            list.push(note, window, cx);
+        });
+        cx.background_executor
+            .advance_clock(NOTIFICATION_TRANSITION_DURATION);
+        cx.run_until_parked();
+        let note = list.read_with(cx, |list, _| {
+            list.notifications
+                .get(&NotificationId::from(TypeId::of::<FooKind>()))
+                .unwrap()
+                .clone()
+        });
+
+        cx.background_executor
+            .advance_clock(Duration::from_secs(1) + Duration::from_millis(50));
+        cx.run_until_parked();
+
         assert_eq!(
             note.read_with(cx, |note, _| note.transition_status),
             ToastTransitionStatus::Ending
